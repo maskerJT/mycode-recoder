@@ -1,0 +1,68 @@
+import socket
+import threading
+import os
+import struct
+import glob
+import time
+
+server_host = '192.168.0.109'
+port = 49160
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((server_host, port))
+
+
+def conn_thread(connection,address):
+    num = 0
+    while True:
+        try:
+            connection.settimeout(600)
+            fileinfo_size=struct.calcsize('64sl')
+            header = connection.recv(fileinfo_size)
+            if header:
+                filename, filesize = struct.unpack('64sl', header)
+                filename = filename[0:14]
+                print('filename: %s' % filename)
+                recvd_size = 0
+                file = open(filename,'wb')
+                print('start receiving %d picture...'% (num + 1))
+                while not recvd_size == filesize:
+                    if filesize - recvd_size > 1024:
+                        rdata = connection.recv(1024)
+                        recvd_size += len(rdata)
+                    else:
+                        rdata = connection.recv(filesize - recvd_size)
+                        recvd_size = filesize
+                    file.write(rdata)
+                file.close()
+                print('received %d picture'% (num + 1))
+                num = num + 1
+                #connection.close()
+        except socket.timeout:
+            connection.close()
+
+
+def reco_thread():
+    while True:
+        jpgfiles=glob.glob(pathname='*.jpg')
+        if len(jpgfiles) >= 4:
+            print('thread2:\n')
+            jpgfiles.sort(key=lambda x:int(x[-5:0]))
+            print(jpgfiles)
+            time.sleep(1)
+        else:
+            print('MD no picture!!!!\n')
+            time.sleep(0.5)
+
+
+s.listen(5)
+thread2 = threading.Thread(target=reco_thread())
+thread2.start()
+while True:
+    connection, address = s.accept()
+    print('Connected by ', address)
+    thread1 = threading.Thread(target=conn_thread, args=(connection, address))
+    thread1.start()
+
+
+s.close()
