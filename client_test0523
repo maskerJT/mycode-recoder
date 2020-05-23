@@ -1,0 +1,87 @@
+# coding = utf-8 #
+import sys
+import os
+import socket
+import threading
+import glob
+import subprocess
+import multiprocessing
+import struct
+
+
+def sayHello():
+    print(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())))
+    shot = threading.Timer(1.0, sayHello)
+    shot.start()
+
+
+def loopshot():
+    subprocess.Popen('nvgstcapture-1.0 -A -C 16 --capture-auto --image-res=3 --file-name=jt --capture-gap=1000',shell=True)
+
+
+def transfer():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.connect(('192.168.0.109', 49160))
+        print("Connected Successfully!")
+    except Exception as e:
+        print("something's wrong with %s:%d. Exception is %s" % ('host', 49160, e))
+    answer = input('ready to shot and transfer? Y/N?')
+    if answer == "Y" or answer == "y":
+        jpgfiles = glob.glob(pathname='*.jpg')
+        print("Hello\n")
+        while len(jpgfiles) == 0:
+            print("getting filename prefix ...\n")
+        prefix = jpgfiles[0][0:13]
+        print("the prefix is %s\n" % prefix)
+        num = 0
+        while True:
+            numstr = '%05d' % num
+            filename = prefix + numstr + '.jpg'
+            if os.path.isfile(filename):
+                filerename = 'soldier' + numstr + '.jpg'
+                fileinfo_size = struct.calcsize('128sl')
+                fhead = struct.pack('64sl', filerename.encode(), os.stat(filename).st_size) # rename
+                s.sendall(fhead)
+                uploading = open(filename, 'rb')
+                while True:
+                    filedata = uploading.read(1024)
+                    if not filedata:
+                        break
+                    s.send(filedata)
+                uploading.close()
+                print("sent counter:%d\n" % (num+1))
+                num = num + 1
+                # s.close()
+    else:
+        s.close()
+        sys.exit()
+
+
+t1 = multiprocessing.Process(target=loopshot())
+t2 = multiprocessing.Process(target=transfer())
+t1.start()
+t2.start()
+
+
+'''
+#while flag
+jpgfiles=glob.glob(pathname='*.jpg')
+if len(jpgfiles)!=0:
+    print(jpgfiles)
+    print('\n')
+    jpgfiles.sort(key=lambda x:int(x[-9:-4]))
+    print(jpgfiles)
+#or set a list that store the newly added picture so that you can send them
+#print(len(jpgfiles))
+'''
+'''
+g=os.walk('/home/jt/Desktop/pic')
+for path,d,filelist in g:
+    for filename in filelist:
+        if filename.endswith('.jpg'):
+            print('yes!\n')
+        else:
+            print('no!\n')
+'''
+
