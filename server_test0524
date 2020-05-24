@@ -1,0 +1,93 @@
+import socket
+import threading
+import multiprocessing
+import os
+import struct
+import glob
+import time
+import shutil
+
+
+def conn_thread(connection,address):
+    num = 0
+    # storepath = '/home/jt/Desktop/program/pic/'
+    while True:
+        try:
+            connection.settimeout(600)
+            fileinfo_size=struct.calcsize('80sl')
+            header = connection.recv(fileinfo_size)
+            if header:
+                filename, filesize = struct.unpack('80sl', header)
+                filename = filename[0:14]
+                print('filename: %s' % filename)
+                recvd_size = 0
+                workpathfile = storepath+filename.decode()
+                file = open(workpathfile,'wb')
+                print('start receiving %d picture...'% (num + 1))
+                while not recvd_size == filesize:
+                    if filesize - recvd_size > 1024:
+                        rdata = connection.recv(1024)
+                        recvd_size += len(rdata)
+                    else:
+                        rdata = connection.recv(filesize - recvd_size)
+                        recvd_size = filesize
+                    file.write(rdata)
+                file.close()
+                print('received %d picture'% (num + 1))
+                num = num + 1
+                #connection.close()
+        except socket.timeout:
+            connection.close()
+
+
+def task01():
+    server_host = '192.168.137.176'
+    port = 49160
+    print('This is task01---conn_thread():\n')
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((server_host, port))
+    s.listen(5)
+    while True:
+        connection, address = s.accept()
+        print('Connected by ', address)
+        thread1 = threading.Thread(target=conn_thread, args=(connection, address))
+        thread1.start()
+    s.close()
+
+
+def reco_thread():
+    while True:
+        jpgfiles=glob.glob(pathname='*.jpg')
+        if len(jpgfiles) >= 4:
+            print('We have picture!!!!\n')
+            files = os.listdir(storepath)
+            files.sort(key=lambda x: int(x[0:4]))
+            print(files)
+            if not os.path.exists(workpath):
+                os.mkdir(workpath)
+            for num in range(0, 4):
+                src = os.path.join(storepath, jpgfiles[num])
+                dst = os.path.join(workpath, jpgfiles[num])
+                shutil.move(src, dst)
+            # jpglist = os.listdir(workpath)
+            # 复制到另外一个文件夹中去，调用三维重建
+            time.sleep(2)
+        else:
+            print('MD no picture!!!!\n')
+            time.sleep(4)
+
+
+def task02():
+    print('This is task02---reco_thread():\n')
+    reco_thread()
+
+
+if __name__ == "__main__":
+    storepath = '/home/jt/Desktop/program/pic/'
+    workpath  = '/home/jt/Desktop/program/picfor3d/'
+    pool = multiprocessing.Pool(processes=2)
+#   pool.apply_async(task01)
+    pool.apply_async(task02)
+    pool.close()
+    pool.join()
