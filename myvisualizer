@@ -1,0 +1,141 @@
+#include <iostream>
+#include <thread>
+#include <pcl/common/common_headers.h>
+#include <pcl/features/normal_3d.h>
+#include <pcl/visualization/pcl_visualizer.h>
+#include <pcl/console/parse.h>
+
+#include <windows.h>
+#include <pcl/visualization/cloud_viewer.h>
+#include <pcl/common/io.h>
+#include <pcl/point_cloud.h>
+#include <pcl/PolygonMesh.h>
+#include <vtkSmartPointer.h>
+#include <vtkPolyData.h>
+#include <pcl/io/vtk_lib_io.h>
+#include<pcl/io/io.h>
+#include<pcl/io/pcd_io.h>//pcd 读写类相关的头文件。
+#include<pcl/io/ply_io.h>
+#include<pcl/point_types.h> //PCL中支持的点类型头文件。
+
+using namespace std::chrono_literals;
+using namespace std;
+
+pcl::visualization::PCLVisualizer::Ptr simpleVis(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud)
+{
+    pcl::visualization::PCLVisualizer::Ptr viewer(new pcl::visualization::PCLVisualizer("3D Viewer"));
+    viewer->setBackgroundColor(0, 0, 0);
+    viewer->addPointCloud<pcl::PointXYZ>(cloud, "sample cloud");
+    viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 1, "sample cloud");
+    viewer->addCoordinateSystem(1.0);
+    viewer->initCameraParameters();
+    return (viewer);
+}
+
+pcl::visualization::PCLVisualizer::Ptr rgbVis(pcl::PointCloud<pcl::PointXYZRGB>::ConstPtr cloud)
+{
+    pcl::visualization::PCLVisualizer::Ptr viewer(new pcl::visualization::PCLVisualizer("3D Viewer"));
+    viewer->setBackgroundColor(0, 0, 0);
+    pcl::visualization::PointCloudColorHandlerRGBField<pcl::PointXYZRGB> rgb(cloud);
+    viewer->addPointCloud<pcl::PointXYZRGB>(cloud, rgb, "sample cloud");
+    viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "sample cloud");
+    viewer->addCoordinateSystem(1.0);
+    viewer->initCameraParameters();
+    return (viewer);
+}
+
+unsigned int text_id = 0;
+void keyboardEventOccurred(const pcl::visualization::KeyboardEvent& event,
+    void* viewer_void)
+{
+    pcl::visualization::PCLVisualizer* viewer = static_cast<pcl::visualization::PCLVisualizer*> (viewer_void);
+    if (event.getKeySym() == "r" && event.keyDown())
+    {
+        std::cout << "r was pressed => removing all text" << std::endl;
+
+        char str[512];
+        for (unsigned int i = 0; i < text_id; ++i)
+        {
+            sprintf(str, "text#%03d", i);
+            viewer->removeShape(str);
+        }
+        text_id = 0;
+    }
+}
+
+void mouseEventOccurred(const pcl::visualization::MouseEvent& event,
+    void* viewer_void)
+{
+    pcl::visualization::PCLVisualizer* viewer = static_cast<pcl::visualization::PCLVisualizer*> (viewer_void);
+    if (event.getButton() == pcl::visualization::MouseEvent::LeftButton &&
+        event.getType() == pcl::visualization::MouseEvent::MouseButtonRelease)
+    {
+        std::cout << "Left mouse button released at position (" << event.getX() << ", " << event.getY() << ")" << std::endl;
+
+        char str[512];
+        sprintf(str, "text#%03d", text_id++);
+        viewer->addText("clicked here", event.getX(), event.getY(), str);
+    }
+}
+
+pcl::visualization::PCLVisualizer::Ptr interactionCustomizationVis()
+{
+    pcl::visualization::PCLVisualizer::Ptr viewer(new pcl::visualization::PCLVisualizer("3D Viewer"));
+    viewer->setBackgroundColor(0, 0, 0);
+    viewer->addCoordinateSystem(1.0);
+
+    viewer->registerKeyboardCallback(keyboardEventOccurred, (void*)viewer.get());
+    viewer->registerMouseCallback(mouseEventOccurred, (void*)viewer.get());
+
+    return (viewer);
+}
+
+int jtPly2Pcd(const string& filepath, pcl::PointCloud<pcl::PointXYZ>::Ptr ptcloud)
+{
+    pcl::PolygonMesh mesh;
+    vtkSmartPointer<vtkPolyData> polydata = vtkSmartPointer<vtkPolyData>::New();
+    pcl::io::loadPolygonFilePLY(filepath, mesh);									//PCL利用VTK的IO接口，可以直接读取stl,ply,obj等格式的三维点云数据,传给PolygonMesh对象
+    pcl::io::mesh2vtk(mesh, polydata);												//将PolygonMesh对象转化为vtkPolyData对象
+    pcl::io::vtkPolyDataToPointCloud(polydata, *ptcloud);								//获取点云
+    pcl::io::savePCDFileASCII("robust.pcd", *ptcloud);									//存储为pcb文件，如果不需要pcd点云甚至可以不保存
+    return 0;
+}
+
+int
+main(int argc, char** argv)
+{
+    bool simple(false), rgb(false), custom_c(false), normals(false), interaction_customization(false);
+    //simple = true;
+    rgb = true;
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr basic_cloud_ptr(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr point_cloud_ptr(new pcl::PointCloud<pcl::PointXYZRGB>);
+    std::cout << "Generating example point clouds.\n\n";
+    char strfilepath[256] = "robust.ply";
+    jtPly2Pcd(strfilepath, basic_cloud_ptr);                                                  //转化ply格式为pcd格式
+    cout << basic_cloud_ptr->points.size() << endl;											//输出点云文件中点的个数
+
+    basic_cloud_ptr->width = (int)basic_cloud_ptr->points.size();
+    basic_cloud_ptr->height = 1;
+    point_cloud_ptr->width = (int)point_cloud_ptr->points.size();
+    point_cloud_ptr->height = 1;
+
+    pcl::visualization::PCLVisualizer::Ptr viewer;
+    if (simple)
+    {
+        viewer = simpleVis(basic_cloud_ptr);
+    }
+    else if (rgb)
+    {
+        viewer = rgbVis(point_cloud_ptr);
+    }
+    else if (interaction_customization)
+    {
+        viewer = interactionCustomizationVis();
+    }
+    while (!viewer->wasStopped())
+    {
+        viewer->spinOnce(100);
+        std::this_thread::sleep_for(100ms);
+    }
+}
