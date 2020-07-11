@@ -1,0 +1,96 @@
+#include <iostream>
+#include <thread>
+#include <pcl/common/common_headers.h>
+#include <pcl/features/normal_3d.h>
+#include <pcl/visualization/pcl_visualizer.h>
+#include <pcl/console/parse.h>
+#include <windows.h>
+#include <pcl/visualization/cloud_viewer.h>
+#include <pcl/common/io.h>
+#include <pcl/point_cloud.h>
+#include <pcl/PolygonMesh.h>
+#include <pcl/io/vtk_lib_io.h>
+#include <pcl/io/io.h>
+#include <pcl/io/pcd_io.h>//pcd 读写类相关的头文件。
+#include <pcl/point_types.h> //PCL中支持的点类型头文件。
+
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/filesystem/convenience.hpp>
+
+using namespace std;
+using namespace std::chrono_literals;
+using namespace boost::filesystem;
+
+
+pcl::visualization::PCLVisualizer::Ptr simpleVis(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud)
+{
+    pcl::visualization::PCLVisualizer::Ptr viewer(new pcl::visualization::PCLVisualizer("3D Viewer"));
+    viewer->setBackgroundColor(0, 0, 0);
+    viewer->addPointCloud<pcl::PointXYZ>(cloud, "sample cloud");
+    viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 1, "sample cloud");
+    //viewer->addCoordinateSystem(0.1);//可以删除removeCoordinateSystem()
+    viewer->initCameraParameters();
+    viewer->spinOnce();
+    return (viewer);
+
+}
+
+
+LPCWSTR str2LPCWSTR(std::string orig)
+{
+    size_t origsize = orig.length() + 1;
+    const size_t newsize = 100;
+    size_t convertedChars = 0;
+    wchar_t* wcstring = (wchar_t*)malloc(sizeof(wchar_t) * (orig.length() - 1));
+    mbstowcs_s(&convertedChars, wcstring, origsize, orig.c_str(), _TRUNCATE);
+    return wcstring;
+}
+
+int main(int argc, char** argv)
+{
+    int num = 1;
+    string pathprefix = "D:\\openMVS\\image\\plyStore";
+    string fullpath = pathprefix + "\\" + to_string(num)+".pcd";
+
+    pcl::visualization::PCLVisualizer::Ptr viewer(new pcl::visualization::PCLVisualizer("3D Viewer"));
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    viewer->setBackgroundColor(0, 0, 0);
+    viewer->setWindowName("3D Visualizer");
+
+    while (!exists(fullpath))
+    {
+        cout << "nothing exists!!!" << endl;
+        viewer->addCoordinateSystem(0.1);
+        Sleep(1000);
+    }
+
+    while (true)
+    {
+        while (exists(fullpath))
+        {
+            viewer->removeAllPointClouds();
+            pcl::io::loadPCDFile(fullpath, *cloud);
+            cout <<"The fullpath:  "<<fullpath <<",  having point number: "<< cloud->points.size()<<endl;
+            viewer->addPointCloud<pcl::PointXYZ>(cloud, to_string(num) + ".pcd");
+            viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 1, to_string(num) + ".pcd");
+            //viewer->addCoordinateSystem(0.1);//可以删除removeCoordinateSystem()
+            viewer->initCameraParameters();
+            num = num + 1;
+            fullpath = pathprefix + "\\" + to_string(num) + ".pcd";
+        }
+        viewer->spinOnce();
+    }
+}
+
+
+//viewer = simpleVis(cloud1);
+//viewer = simpleVis(cloud2);
+//*cloud2 = *cloud2 + *cloud1;
+//viewer = simpleVis(cloud2);
+//viewer->removeAllPointClouds();
+//cloud1->clear();
+ //jtPly2Pcd("gate.ply", cloud1);
+//cloud1->width = (int)cloud1->points.size();
+//cloud1->height = 1;
+//viewer->updatePointCloud(cloud1, "sample cloud");
