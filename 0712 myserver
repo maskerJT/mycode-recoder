@@ -1,0 +1,151 @@
+import os
+import time
+import socket
+import struct
+import threading
+import multiprocessing
+import shutil
+import subprocess
+import open3d
+
+
+def conn_thread(conn, address, flag):
+    print("Client from {} connected!".format(address))
+    msg = "**Now You have connection with Server!**"
+    conn.send(msg.encode())
+    num = 1
+    round = 1
+    pic_per_set = 15
+    store_prefix = "D:/openMVS/image/imageStore/imageSet"
+    store_dir = store_prefix + str(round)
+    if not os.path.exists(store_dir):
+        os.mkdir(store_dir)
+    while True:
+        header = conn.recv(struct.calcsize('16sQ'))
+        if not header:
+            print("client closed the connection")
+            break
+        filename, filesize = struct.unpack('16sQ', header)
+        file_str = filename.decode().strip('\0')+str(num)+".jpg"
+        filepath = os.path.join(store_dir, file_str)
+        with open(filepath, 'wb') as file:
+            recvd_size = 0
+            while not recvd_size == filesize:
+                if filesize - recvd_size > 1024:
+                    rdata = conn.recv(1024)
+                    conn.send(struct.pack('I', len(rdata)))
+                    recvd_size += len(rdata)
+                else:
+                    rdata = conn.recv(filesize - recvd_size)
+                    conn.send(struct.pack('I', len(rdata)))
+                    recvd_size = filesize
+                file.write(rdata)
+        if round != ((num // pic_per_set) + 1):
+            round = (num // pic_per_set) + 1
+            store_dir = store_prefix + str(round)
+            if not os.path.exists(store_dir):
+                os.mkdir(store_dir)
+        num = num + 1
+        print("[Client {}] File <{}> has been written successfully".format(address, file_str))
+
+    conn.close()
+
+
+def task01_socket(port, flag):
+    s = socket.socket()
+    s.bind(('0.0.0.0', port))
+    s.listen(4)
+    while True:
+        conn, addr = s.accept()
+        t = threading.Thread(target=conn_thread, args=(conn, addr, flag))
+        t.start()
+
+
+def initpath(path):
+    shutil.rmtree(path)
+    os.mkdir(path)
+
+
+def task02_recons(flag):
+    print("Getting into the reconstruction process!!!\n")
+    OPENMVG_SFM_BIN = "D:/openMVS/build/openMVG/Windows-AMD64-Release/Release"
+    image_store_dir = "D:/openMVS/image/imageStore"
+    output_store_dir = "D:/openMVS/image/resultStore"
+    ply_dir = "D:/openMVS/image/plyStore"
+    if not os.path.exists(image_store_dir) and os.path.exists(output_store_dir) and os.path.exists(ply_dir):
+        print("invalid path, please check it.\n")
+        sys.exist(1)
+    initpath(imge_store_dir)
+    initpath(output_store_dir)
+    initpath(ply_dir)
+    round = 1
+    failcount = 0
+    while True:
+        input_dir_next = image_store_dir + "/imageSet" + str(round+1)
+        if os.path.exists(input_dir_next):
+            input_dir = image_store_dir + "/imageSet" + str(round)
+            output_dir = output_store_dir + "/result" + str(round)
+            if not os.path.exists(output_dir):
+                os.mkdir(output_dir)
+            matches_dir = os.path.join(output_dir, "matches")
+            reconstruction_dir = os.path.join(output_dir, "reconstruction_sequential")
+            if not os.path.exists(matches_dir):
+                os.mkdir(matches_dir)
+            if not os.path.exists(reconstruction_dir):
+                os.mkdir(reconstruction_dir)
+
+            print("3D Round:", round, "_1. Intrinsics analysis")
+            pIntrisics = subprocess.Popen(
+                [os.path.join(OPENMVG_SFM_BIN, "openMVG_main_SfMInit_ImageListing"), "-i", input_dir, "-o", matches_dir,
+                 "-f", "3034"])
+            pIntrisics.wait()
+
+            print("3D Round:", round, "_2. Compute features")
+            pFeatures = subprocess.Popen(
+                [os.path.join(OPENMVG_SFM_BIN, "openMVG_main_ComputeFeatures"), "-i", matches_dir + "/sfm_data.json",
+                 "-o", matches_dir, "-m", "SIFT"])
+            pFeatures.wait()
+
+            print("3D Round:", round, "_3. Compute matches")
+            pMatches = subprocess.Popen(
+                [os.path.join(OPENMVG_SFM_BIN, "openMVG_main_ComputeMatches"), "-i", matches_dir + "/sfm_data.json",
+                 "-o", matches_dir])
+            pMatches.wait()
+
+            print("3D Round:", round, "_4. Do Sequential/Incremental reconstruction")
+            pRecons = subprocess.Popen(
+                [os.path.join(OPENMVG_SFM_BIN, "openMVG_main_IncrementalSfM"), "-i", matches_dir + "/sfm_data.json",
+                 "-m", matches_dir, "-o", reconstruction_dir])
+            pRecons.wait()
+
+            ply_file = os.path.join(reconstruction_dir, "cloud_and_poses.ply")
+            if os.path.exists(ply_file):
+                pcd = open3d.io.read_point_cloud(ply_file)
+                pcdpath = os.path.join(reconstruction_dir, str(round)+".pcd")
+                open3d.io.write_point_cloud(pcdpath, pcd)
+                shutil.move(pcdpath, ply_dir)
+                print("This round done!\n")
+                round = round + 1
+            else:
+                failcount = failcount + 1
+                print("This round failed. Total failure count is %d\n",failcount)
+
+
+def task03_render():
+    subprocess.Popen(os.path.join(OPENMVG_SFM_BIN, "pcl_project"))
+
+
+if __name__ == "__main__":
+    Port = int(input("Please input the listening Port:"))
+    print("\n Server is listening on port :", Port, "\n")
+    flag = multiprocessing.Queue()
+
+    p1 = multiprocessing.Process(target=task01_socket, args=(Port, flag,))
+    p2 = multiprocessing.Process(target=task02_recons, args=(flag,))
+    # p3 = multiprocessing.Process(target=task02_recons, args=(flag,))
+    # p3.start()
+    p1.start()
+    p2.start()
+
+
+
