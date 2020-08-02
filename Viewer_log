@@ -1,0 +1,26 @@
+//scene.cpp
+
+#include <sys/stat.h>
+
+void Scene::ProcessEvents()
+{
+	char* filepath = "C:/Users/MVP/Desktop/resultStore/working/initpair.ply";
+	struct _stat buf1, buf2;
+
+	if (_stat(filepath, &buf1) == 0)
+	{
+		_stat(filepath, &buf2);
+		if (buf1.st_size == buf2.st_size)
+		{
+			Open(filepath);
+			std::cout << "openning^^^^^^^^^^\n";
+		}
+	}
+	else
+		std::cout << "NO initfile!!!\n";
+
+	glfwWaitEvents();
+	window.UpdateMousePosition();
+	if (glfwGetMouseButton(window.GetWindow(), GLFW_MOUSE_BUTTON_1) != GLFW_RELEASE)
+		window.camera->Rotate(window.pos, window.prevPos);
+}
