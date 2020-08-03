@@ -24,3 +24,42 @@ void Scene::ProcessEvents()
 	if (glfwGetMouseButton(window.GetWindow(), GLFW_MOUSE_BUTTON_1) != GLFW_RELEASE)
 		window.camera->Rotate(window.pos, window.prevPos);
 }
+
+0803：
+void Scene::Loop()
+{
+	static unsigned int counter = 1;
+	static unsigned int loopname = 0;
+	std::string filename = "seedPair.ply";
+	std::string nextname;
+	std::ostringstream os;
+	while (!glfwWindowShouldClose(window.GetWindow())) {
+		std::string prefix = "C:/Users/MVP/Desktop/path/resultstore/result" + std::to_string(counter) + "/reconstruction_sequential/";
+		if (stlplus::file_exists(prefix + filename) || stlplus::file_exists(prefix + "clouds.ply"))
+		{
+			os.str("");
+			std::cout << "the existed filename is" << filename << std::endl;
+			Open((prefix + filename).c_str());
+			if (filename == "seedPair.ply")
+			{
+				os << std::setw(4) << std::setfill('0') << loopname << ".ply";
+				nextname = os.str();
+			}
+			else if (filename == "clouds.ply")
+			{
+				counter++;
+				loopname = 0;
+				nextname = "seedPair.ply";
+			}
+			else
+			{
+				loopname++;
+				os << std::setw(4) << std::setfill('0') << loopname << ".ply";
+				nextname = os.str();
+			}
+			filename = nextname;
+		}
+		ProcessEvents();
+		Draw();
+	}
+}
