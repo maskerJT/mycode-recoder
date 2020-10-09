@@ -171,3 +171,115 @@ int main()
     return 0;
 }
 
+##########################version 3################################
+include <iostream>
+#include <vector>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/core/core.hpp>
+#include "opencv2/imgproc/imgproc.hpp"
+#include "opencv2/features2d/features2d.hpp"
+#include <Windows.h>
+#include <GL/gl.h>
+#include "SiftGPU.h"
+#include <boost/timer.hpp>
+
+
+
+#pragma comment(lib,"devil.lib")
+//#pragma comment(lib,"ilu.lib")
+//#pragma comment(lib,"ilut.lib")
+
+using namespace cv;
+using namespace std;
+
+
+
+int main()
+{
+    SiftGPU* sift = new SiftGPU;
+    SiftMatchGPU* matcher = new SiftMatchGPU(4096);
+    vector<float > descriptors1(1), descriptors2(1);
+    vector<SiftGPU::SiftKeypoint> keys1(1), keys2(1);
+
+    int num1 = 0, num2 = 0;
+    char* argv[4];
+    argv[0] = (char*)"-fo";
+    argv[1] = (char*)"-1";
+    argv[2] = (char*)"-v";
+    argv[3] = (char*)"1";
+    int argc = sizeof(argv) / sizeof(char*);
+    sift->ParseParam(argc, argv);
+    if (sift->CreateContextGL() != SiftGPU::SIFTGPU_FULL_SUPPORTED) return 0;
+
+    boost::timer timer1;
+    if (sift->RunSIFT("1.jpg"))
+    {
+        sift->SaveSIFT("./fuck.sift"); //Note that saving ASCII format is slow
+        num1 = sift->GetFeatureNum();
+        keys1.resize(num1);
+        descriptors1.resize(128 * num1);
+        sift->GetFeatureVector(&keys1[0], &descriptors1[0]);
+    }
+    cout << "siftgpu::runsift(1) cost time=" << timer1.elapsed() << endl;
+    cout << "GetFeatureNum=" << num1 << endl;
+    //You can have at most one OpenGL-based SiftGPU (per process).
+    //Normally, you should just create one, and reuse on all images. 
+    cout << "##############################" << endl;
+    timer1.restart();
+    if (sift->RunSIFT("2.jpg"))
+    {
+        sift->SaveSIFT("./damn.sift");
+        num2 = sift->GetFeatureNum();
+        keys2.resize(num2);    
+        descriptors2.resize(128 * num2);
+        sift->GetFeatureVector(&keys2[0], &descriptors2[0]);
+    }
+    cout << "siftgpu::runsift(2) cost time=" << timer1.elapsed() << endl;
+    cout << "GetFeatureNum=" << num1 << endl;
+
+
+    matcher->VerifyContextGL(); //must call once
+    boost::timer timer;
+    matcher->SetDescriptors(0, num1, &descriptors1[0]); //image 1
+    cout << "siftgpu::match1 cost time=" << timer.elapsed() << endl;
+
+    timer.restart();
+    matcher->SetDescriptors(1, num2, &descriptors2[0]); //image 2
+    cout << "siftgpu::match2 cost time=" << timer.elapsed() << endl;
+
+    //match and get result.    
+    int(*match_buf)[2] = new int[num1][2];
+    //use the default thresholds. Check the declaration in SiftGPU.h
+    int num_match = matcher->GetSiftMatch(num1, match_buf);
+    std::cout << num_match << " sift matches were found;\n";
+
+    Mat img1=imread("C:\\Users\\MVP\\source\\repos\\myCVpro\\myCVpro\\1.jpg",0);
+    Mat img2=imread("2.jpg",0);
+    //drawMatches(img1, keys1(1),         //第一幅图像和它的特征点  
+    //	img2, key_points2,      //第二幅图像和它的特征点  
+    //	matches,       //匹配器算子  
+    //	img_matches,      //匹配输出图像  
+    //	Scalar(255, 0, 255));     //用红色色直线连接两幅图像中的特征点  
+
+    //enumerate all the feature matches
+    for (int i = 0; i < num_match; ++i)
+    {
+        //How to get the feature matches: 
+        //SiftGPU::SiftKeypoint & key1 = keys1[match_buf[i][0]];
+        //SiftGPU::SiftKeypoint & key2 = keys2[match_buf[i][1]];
+        //key1 in the first image matches with key2 in the second image
+    }
+
+    //*****************GPU Guided SIFT MATCHING***************
+    //example: define a homography, and use default threshold 32 to search in a 64x64 window
+    //float h[3][3] = {{0.8f, 0, 0}, {0, 0.8f, 0}, {0, 0, 1.0f}};
+    //matcher->SetFeatureLocation(0, &keys1[0]); //SetFeatureLocaiton after SetDescriptors
+    //matcher->SetFeatureLocation(1, &keys2[0]);
+    //num_match = matcher->GetGuidedSiftMatch(num1, match_buf, h, NULL);
+    //std::cout << num_match << " guided sift matches were found;\n";
+    //if you can want to use a Fundamental matrix, check the function definition
+
+    // clean up..
+    delete[] match_buf;
+    return 0;
+}
