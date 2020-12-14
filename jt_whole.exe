@@ -1,0 +1,418 @@
+20201214
+
+#include "openMVG/cameras/cameras.hpp"
+#include "openMVG/cameras/Cameras_Common_command_line_helper.hpp"
+#include "openMVG/exif/exif_IO_EasyExif.hpp"
+#include "openMVG/exif/sensor_width_database/ParseDatabase.hpp"
+#include "openMVG/image/image_io.hpp"
+#include "openMVG/numeric/eigen_alias_definition.hpp"
+
+#include "openMVG/graph/graph.hpp"
+#include "openMVG/graph/graph_stats.hpp"
+#include "openMVG/features/descriptor.hpp"
+#include "openMVG/features/feature.hpp"
+
+#include "openMVG/matching_image_collection/Matcher_Regions.hpp"
+#include "openMVG/matching_image_collection/Cascade_Hashing_Matcher_Regions.hpp"
+#include "openMVG/matching_image_collection/GeometricFilter.hpp"
+
+#include "openMVG/sfm/pipelines/sfm_features_provider.hpp"
+#include "openMVG/sfm/pipelines/sfm_regions_provider.hpp"
+#include "openMVG/sfm/pipelines/sfm_regions_provider_cache.hpp"
+#include "openMVG/sfm/pipelines/sequential/sequential_SfM.hpp"
+#include "openMVG/sfm/pipelines/sfm_matches_provider.hpp"
+
+#include "openMVG/matching_image_collection/F_ACRobust.hpp"
+#include "openMVG/matching_image_collection/E_ACRobust.hpp"
+#include "openMVG/matching_image_collection/E_ACRobust_Angular.hpp"
+#include "openMVG/matching_image_collection/Eo_Robust.hpp"
+#include "openMVG/matching_image_collection/H_ACRobust.hpp"
+#include "openMVG/matching_image_collection/Pair_Builder.hpp"
+#include "openMVG/matching/pairwiseAdjacencyDisplay.hpp"
+
+#include "openMVG/sfm/sfm_data.hpp"
+#include "openMVG/sfm/sfm_data_io.hpp"
+#include "openMVG/sfm/sfm_data_utils.hpp"
+#include "openMVG/sfm/sfm_report.hpp"
+#include "openMVG/sfm/sfm_view.hpp"
+#include "openMVG/sfm/sfm_view_priors.hpp"
+#include "openMVG/types.hpp"
+#include "openMVG/jtcuda/cudaSift.h"
+#include "openMVG/jtcuda/cudaImage.h"
+#include "openMVG/stl/stl.hpp"
+#include <boost\timer.hpp>
+
+#include "third_party/progress/progress_display.hpp"
+#include "third_party/stlplus3/filesystemSimplified/file_system.hpp"
+#include "openMVG/matching/indMatch.hpp"
+#include "openMVG/matching/indMatch_utils.hpp"
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+
+#include <cstdlib>
+#include <fstream>
+#include <memory>
+#include <string>
+#include <utility>
+#include <omp.h>
+
+using namespace openMVG;
+using namespace openMVG::cameras;
+using namespace openMVG::features;
+using namespace openMVG::exif;
+using namespace openMVG::matching;
+using namespace openMVG::robust;
+using namespace openMVG::matching_image_collection;
+using namespace openMVG::image;
+using namespace openMVG::sfm;
+using namespace boost;
+using namespace std;
+using namespace cv;
+//******************************************************************************************************************
+//------------------------------------------ Definded Class
+//******************************************************************************************************************
+class JT_cmd {
+public:
+    int width=648;
+    int height=968;
+    int iNumThreads;
+    int imax_iteration = 2048;
+    int triangulation_method = static_cast<int>(ETriangulationMethod::DEFAULT);
+    int resection_method = static_cast<int>(resection::SolverType::DEFAULT);
+    float fDistRatio = 0.8f;
+    float initBlur = 2.0f;//jt 2.0 //the less ,the more points
+    float thresh = 3.0f;//jt 3.0 //the less, the more points
+    double focal_pixels = 1000;
+    SiftData* siftData;
+    float* memoryTmp;
+    CudaImage* cudaImg;
+    SfM_Data* sfm_data;
+    std::string* sImageDir;
+    std::string* sOutputDir;
+    std::string IR_Option = "ADJUST_ALL";
+    cv::Mat** jt_mat;
+    SequentialSfMReconstructionEngine* sfm_engine;
+};
+
+
+
+
+    
+
+//******************************************************************************************************************
+//------------------------------------------ Declared functions
+//******************************************************************************************************************
+int jt_listing(JT_cmd&);
+int jt_features(JT_cmd&);
+int jt_matches(JT_cmd&);
+int jt_sfm(JT_cmd&);
+bool SaveFeats(SiftData& siftData, const std::string& FeatsFile);
+bool SaveDescs(SiftData& siftData, const std::string& DescsFlie);
+bool SaveAll(SiftData& siftData, const std::string& FeatsFile, const std::string& DescsFlie);
+inline void siftDesc2UChar(float* descr, unsigned char* descrptor);
+
+
+//******************************************************************************************************************
+//------------------------------------------ Defined functions
+//******************************************************************************************************************
+inline void siftDesc2UChar(float* src, unsigned char* dest)
+{
+    const float sum = std::accumulate(src, src + 128, 0.0f);
+    for (int k = 0; k < 128; ++k)
+    {
+        dest[k] = static_cast<unsigned char>(512.f * sqrt(src[k] / sum));
+    }
+    /*  for (int k = 0; k < 128; ++k)*/
+      //{
+      //    dest[k] = static_cast<unsigned char>(512.f * sqrt(dest[k]));
+      //}
+}
+
+
+
+bool SaveDescs(SiftData& siftData, const std::string& DescsFlie)
+{
+    SiftPoint* jt = siftData.h_data;
+    const std::size_t cardDesc = siftData.numPts;
+    unsigned char Udata[128];
+    std::ofstream file(DescsFlie.c_str(), std::ios::out | std::ios::binary);
+    if (!file.is_open())
+        return false;
+    file.write((const char*)&cardDesc, sizeof(std::size_t));
+    for (int i = 0; i < cardDesc; ++i)
+    {
+        siftDesc2UChar(jt[i].data, Udata);
+        file.write((char*)Udata, 128);
+    }
+    const bool bOk = file.good();
+    file.close();
+    return bOk;
+}
+
+bool SaveFeats(SiftData& siftData, const std::string& FeatsFile)
+{
+    int numfeats = siftData.numPts;
+    SiftPoint* jt = siftData.h_data;
+    std::ofstream file(FeatsFile.c_str());
+    if (!file.is_open())
+        return false;
+    for (int i = 0; i < numfeats; ++i)
+    {
+        file << jt[i].xpos << ' ' << jt[i].ypos << ' ' << jt[i].scale << ' ' << (jt[i].orientation) * (float)0.0174533 << std::endl;
+    }
+    const bool bOk = file.good();
+    file.close();
+    return bOk;
+}
+
+bool SaveAll(SiftData& siftData, const std::string& FeatsFile, const std::string& DescsFlie) {
+    const std::size_t  cardDesc = siftData.numPts;
+    SiftPoint* jt = siftData.h_data;
+    unsigned char Udata[128];
+
+    std::ofstream descsfile(DescsFlie.c_str(), std::ios::out | std::ios::binary);
+    std::ofstream featsfile(FeatsFile.c_str());
+    if (!descsfile.is_open()||!featsfile.is_open())
+        return false;
+    descsfile.write((const char*)&cardDesc, sizeof(std::size_t));
+    for (int i = 0; i < cardDesc; ++i)
+    {
+        featsfile << jt[i].xpos << ' ' << jt[i].ypos << ' ' << jt[i].scale << ' ' << (jt[i].orientation) * (float)0.0174533 << std::endl;
+        siftDesc2UChar(jt[i].data, Udata);
+        descsfile.write((char*)Udata, 128);
+    }
+    const bool bOk1 = descsfile.good();
+    const bool bOk2 = featsfile.good();
+    featsfile.close();
+    return bOk1&&bOk2;
+}
+
+//************************************************************************************functions******************************************************************************************************//
+
+int jt_listing(JT_cmd& jt_cmd) {
+    Views& views = jt_cmd.sfm_data->views;
+    Intrinsics& intrinsics = jt_cmd.sfm_data->intrinsics;
+    std::vector<std::string> vec_image = stlplus::folder_files(*jt_cmd.sImageDir);
+    std::sort(vec_image.begin(), vec_image.end());
+    double width = -1, height = -1, focal = -1, ppx = -1, ppy = -1;
+    int i = 0;
+    for (std::vector<std::string>::const_iterator iter_image = vec_image.begin(); iter_image != vec_image.end(); ++iter_image) {
+        const std::string sImageFilename = stlplus::create_filespec(*jt_cmd.sImageDir, *iter_image);
+        const std::string sImFilenamePart = stlplus::filename_part(sImageFilename);
+        ImageHeader imgHeader;
+        if (!openMVG::image::ReadImageHeader(sImageFilename.c_str(), &imgHeader))
+            continue;
+        width = imgHeader.width;
+        height = imgHeader.height;
+        ppx = width / 2.0;
+        ppy = height / 2.0;
+        focal = jt_cmd.focal_pixels;
+        std::shared_ptr<IntrinsicBase> intrinsic;
+        intrinsic = std::make_shared<Pinhole_Intrinsic_Radial_K3>(width, height, focal, ppx, ppy, 0.0, 0.0, 0.0);
+        {
+            View v(*iter_image, views.size(), views.size(), views.size(), width, height);
+            intrinsics[v.id_intrinsic] = intrinsic;
+            views[v.id_view] = std::make_shared<View>(v);
+        }
+        std::cout << "sImageFilename" << sImageFilename;
+        cv::imread(sImageFilename, 0).convertTo(*jt_cmd.jt_mat[i], CV_32FC1);
+        i++;
+    }
+    GroupSharedIntrinsics(*jt_cmd.sfm_data);
+    return 0;
+}
+
+//int jt_features(JT_cmd& jt_cmd) {
+//    cv::Mat MAT;
+//    for (int i = 0; i < static_cast<int>(jt_cmd.sfm_data->views.size()); ++i) {
+//        Views::const_iterator iterViews = jt_cmd.sfm_data->views.begin();
+//        std::advance(iterViews, i);
+//        const View* view = iterViews->second.get();
+//        const std::string filename = stlplus::create_filespec(jt_cmd.sfm_data->s_root_path, view->s_Img_path),
+//            sFeat = stlplus::create_filespec(*jt_cmd.sOutputDir, stlplus::basename_part(filename), "feat"),
+//            sDesc = stlplus::create_filespec(*jt_cmd.sOutputDir, stlplus::basename_part(filename), "desc");
+//        cv::imread(filename, 0).convertTo(MAT, CV_32FC1);
+//        int w = MAT.cols;
+//        int h = MAT.rows;
+//        jt_cmd.cudaImg->Allocate(w, h, iAlignUp(w, 128), false, NULL, (float*)MAT.data);
+//        jt_cmd.cudaImg->Download();
+//        ExtractSift(*jt_cmd.siftData, *jt_cmd.cudaImg, 5, jt_cmd.initBlur, jt_cmd.thresh, 0.0f, false, jt_cmd.memoryTmp);
+//        if (!SaveAll(*jt_cmd.siftData, sFeat, sDesc)) {
+//            std::cout << "ERROR OCCURES!!!" << std::endl;
+//        }
+//    }
+//    return 0;
+//}
+int jt_features(JT_cmd& jt_cmd) {
+    cv::Mat** MAT=jt_cmd.jt_mat;
+    int w = jt_cmd.width;
+    int h = jt_cmd.height;
+    for (int i = 0; i < static_cast<int>(jt_cmd.sfm_data->views.size()); ++i) {
+        Views::const_iterator iterViews = jt_cmd.sfm_data->views.begin();
+        std::advance(iterViews, i);
+        const View* view = iterViews->second.get();
+        const std::string filename = stlplus::create_filespec(jt_cmd.sfm_data->s_root_path, view->s_Img_path),
+            sFeat = stlplus::create_filespec(*jt_cmd.sOutputDir, stlplus::basename_part(filename), "feat"),
+            sDesc = stlplus::create_filespec(*jt_cmd.sOutputDir, stlplus::basename_part(filename), "desc");
+        /*jt_cmd.cudaImg->Allocate(w, h, iAlignUp(w, 128), false, NULL, (float*)*MAT[i]->data);*/
+        jt_cmd.cudaImg->Allocate(w, h, iAlignUp(w, 128), false, NULL, (float*)jt_cmd.jt_mat[i]->data);
+        jt_cmd.cudaImg->Download();
+        ExtractSift(*jt_cmd.siftData, *jt_cmd.cudaImg, 5, jt_cmd.initBlur, jt_cmd.thresh, 0.0f, false, jt_cmd.memoryTmp);
+        if (!SaveAll(*jt_cmd.siftData, sFeat, sDesc)) {
+            std::cout << "ERROR OCCURES!!!" << std::endl;
+        }
+    }
+    return 0;
+}
+
+int jt_matches(JT_cmd& jt_cmd) {
+    SfM_Data* sfm_data = jt_cmd.sfm_data;
+    std::string sGeometricMatchesFilename = "matches.f.bin";
+    const std::string sImage_describer = stlplus::create_filespec(*jt_cmd.sOutputDir, "image_describer", "json");
+    std::unique_ptr<Regions> regions_type = Init_region_type_from_file(sImage_describer);
+    if (!regions_type) {
+        std::cerr << "Invalid regions type." << std::endl;
+        return EXIT_FAILURE;
+    }
+    std::shared_ptr<Regions_Provider> regions_provider;
+    regions_provider = std::make_shared<Regions_Provider>();
+    C_Progress_display progress;
+    if (!regions_provider->load(*sfm_data, *jt_cmd.sOutputDir, regions_type, &progress)) {
+        std::cerr << std::endl << "Invalid regions." << std::endl;
+        return EXIT_FAILURE;
+    }
+    PairWiseMatches map_PutativesMatches;
+    std::vector<std::string> vec_fileNames;
+    std::vector<std::pair<size_t, size_t>> vec_imagesSize;
+    {
+        vec_fileNames.reserve(sfm_data->GetViews().size());
+        vec_imagesSize.reserve(sfm_data->GetViews().size());
+        for (Views::const_iterator iter = sfm_data->GetViews().begin(); iter != sfm_data->GetViews().end(); ++iter)
+        {
+            const View* v = iter->second.get();
+            vec_fileNames.push_back(stlplus::create_filespec(sfm_data->s_root_path, v->s_Img_path));
+            vec_imagesSize.push_back(std::make_pair(v->ui_width, v->ui_height));
+        }
+    }
+    std::unique_ptr<Matcher> collectionMatcher;
+    collectionMatcher.reset(new Cascade_Hashing_Matcher_Regions(jt_cmd.fDistRatio));
+    if (!collectionMatcher) {
+        std::cerr << "Invalid Nearest Neighbor method" << std::endl;
+        return EXIT_FAILURE;
+    }
+    Pair_Set pairs;
+    pairs = exhaustivePairs(sfm_data->GetViews().size());
+    collectionMatcher->Match(regions_provider, pairs, map_PutativesMatches, &progress);
+    std::unique_ptr<ImageCollectionGeometricFilter> filter_ptr(new ImageCollectionGeometricFilter(sfm_data, regions_provider));
+
+    if (filter_ptr)
+    {
+        const double d_distance_ratio = 0.6;
+        PairWiseMatches map_GeometricMatches;
+        filter_ptr->Robust_model_estimation(GeometricFilter_FMatrix_AC(4.0, jt_cmd.imax_iteration), map_PutativesMatches, false, d_distance_ratio, &progress);
+        map_GeometricMatches = filter_ptr->Get_geometric_matches();
+        if (!Save(map_GeometricMatches, std::string(*jt_cmd.sOutputDir + sGeometricMatchesFilename)))
+        {
+            std::cerr << "Cannot save computed matches in: " << std::string(*jt_cmd.sOutputDir + sGeometricMatchesFilename);
+            return EXIT_FAILURE;
+        }
+    }
+    return 0;
+}
+
+int jt_sfm(JT_cmd& jt_cmd) {
+    const cameras::Intrinsic_Parameter_Type intrinsic_refinement_options = cameras::StringTo_Intrinsic_Parameter_Type(jt_cmd.IR_Option);
+    if (intrinsic_refinement_options == static_cast<cameras::Intrinsic_Parameter_Type>(0))
+    {
+        std::cerr << "Invalid input for Bundle Adjusment Intrinsic parameter refinement option" << std::endl;
+        return EXIT_FAILURE;
+    }
+    SfM_Data* sfm_data = jt_cmd.sfm_data;
+
+    std::unique_ptr<Regions> regions_type;
+    regions_type.reset(new features::SIFT_Regions());
+    // Features reading
+    std::shared_ptr<Features_Provider> feats_provider = std::make_shared<Features_Provider>();
+    if (!feats_provider->load(*sfm_data, *jt_cmd.sOutputDir, regions_type)) {
+        std::cerr << std::endl
+            << "Invalid features." << std::endl;
+        return EXIT_FAILURE;
+    }
+    // Matches reading
+    std::shared_ptr<Matches_Provider> matches_provider = std::make_shared<Matches_Provider>();
+    if (!matches_provider->load(*sfm_data, stlplus::create_filespec(*jt_cmd.sOutputDir, "matches.f.bin")))
+    {
+        std::cerr << "Invalid matches file." << std::endl;
+        return EXIT_FAILURE;
+    }
+
+    SequentialSfMReconstructionEngine sfmEngine(*sfm_data, *jt_cmd.sOutputDir, "");
+    sfmEngine.SetFeaturesProvider(feats_provider.get());
+    sfmEngine.SetMatchesProvider(matches_provider.get());
+
+    // Configure reconstruction parameters
+    sfmEngine.Set_Intrinsics_Refinement_Type(intrinsic_refinement_options);
+    sfmEngine.SetUnknownCameraType(EINTRINSIC(PINHOLE_CAMERA_RADIAL3));
+    sfmEngine.Set_Use_Motion_Prior(false);
+    sfmEngine.SetTriangulationMethod(static_cast<ETriangulationMethod>(jt_cmd.triangulation_method));
+    sfmEngine.SetResectionMethod(static_cast<resection::SolverType>(jt_cmd.resection_method));
+    if (sfmEngine.Process())
+    {
+        //Save(sfmEngine.Get_SfM_Data(), stlplus::create_filespec(*jt_cmd.sOutputDir, "sfm_data", ".bin"), ESfM_Data(ALL));
+        Save(sfmEngine.Get_SfM_Data(), stlplus::create_filespec(*jt_cmd.sOutputDir, "clouds", ".ply"), ESfM_Data(ALL));
+        return EXIT_SUCCESS;
+    }
+    return EXIT_FAILURE;
+}
+
+int main(int argc, char** argv) {
+    std::string sImageDir = "C:\\Users\\MVP\\Desktop\\localwork\\images\\";
+    std::string sOutputDir = "C:\\Users\\MVP\\Desktop\\localwork\\results\\";
+    SfM_Data sfm_data;
+    sfm_data.s_root_path = sImageDir;
+    SiftData siftData;
+    CudaImage cudaImg;
+    cv::Mat MAT[4];
+
+    InitSiftData(siftData, 32768, true, true);
+    
+
+
+    JT_cmd jt_cmd;
+    jt_cmd.iNumThreads = 4;
+    jt_cmd.sfm_data = &sfm_data;
+    jt_cmd.sImageDir = &sImageDir;
+    jt_cmd.sOutputDir = &sOutputDir;
+    jt_cmd.cudaImg = &cudaImg;
+    jt_cmd.siftData = &siftData;
+    jt_cmd.memoryTmp = AllocSiftTempMemory(jt_cmd.width, jt_cmd.height, 5, false);
+    for (int i = 0; i < 4; i++) {
+        jt_cmd.jt_mat[i] = &MAT[i];
+    }
+
+    InitCuda(0);
+
+    double stamp=0;
+    timer t;
+
+    jt_listing(jt_cmd);
+    stamp = t.elapsed();
+    std::cout << "jt_listing：" << stamp << "(s)" << std::endl;
+
+     jt_features(jt_cmd);
+    std::cout << "jt_features：" << t.elapsed()-stamp << "(s)" << std::endl;
+    stamp = t.elapsed();
+
+    jt_matches(jt_cmd);
+    std::cout << "jt_matches：" << t.elapsed()-stamp << "(s)" << std::endl;
+    stamp = t.elapsed();
+
+
+    jt_sfm(jt_cmd);
+    std::cout << "jt_sfm：" << t.elapsed()-stamp<< "(s)" << std::endl;
+    std::cout << "whole time：" << t.elapsed() << "(s)" << std::endl;
+
+    //deinit;
+    return 0;
+}
