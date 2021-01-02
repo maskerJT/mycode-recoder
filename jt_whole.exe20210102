@@ -82,8 +82,7 @@ std::shared_ptr<vector<float>>myfeats[4];
 std::shared_ptr<vector<unsigned char>>mydescs[4];
 float* myfeats2[4];
 char* mydescs2[4];
-//PairWiseMatches *Gmatches=new PairWiseMatches();
-PairWiseMatches* Gmatches;
+PairWiseMatches *Gmatches=new PairWiseMatches();
 
 
 int tmatches(std::string sOutputDir);
@@ -298,7 +297,7 @@ int tlisting(std::string sImageDir, std::string& OutPath) {
             cudaImg.Allocate(width, height, iAlignUp(width, 128), false, NULL, (float*)mat.data);
             cudaImg.Download();
             ExtractSift(siftData, cudaImg, 5, initBlur, thresh, 0.0f, false, memoryTmp);
-            SaveAll(siftData, sFeat, sDesc);
+            //SaveAll(siftData, sFeat, sDesc);
             //transfor(siftData,*(myfeats + i),*(mydescs + i));
             //myfeats[i] = getfeatszone(siftData);
             //mydescs[i] = getdescszone(siftData);
@@ -339,11 +338,11 @@ int tmatches(std::string OutPath) {
         filter_ptr->Robust_model_estimation(GeometricFilter_FMatrix_AC(4.0, 2048), map_PutativesMatches, false, d_distance_ratio, nullptr);
         *Gmatches = filter_ptr->Get_geometric_matches();
         //globalmatches = &map_GeometricMatches;
-        if (!Save(*Gmatches, std::string(OutPath + "matches.f.bin")))
-        {
-            std::cerr << "Cannot save computed matches in: " << std::string(OutPath + "matches.f.bin");
-            return EXIT_FAILURE;
-        }
+        //if (!Save(*Gmatches, std::string(OutPath + "matches.f.bin")))
+        //{
+        //    std::cerr << "Cannot save computed matches in: " << std::string(OutPath + "matches.f.bin");
+        //    return EXIT_FAILURE;
+        //}
     }
     return 0;
 }
