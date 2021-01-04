@@ -1,0 +1,418 @@
+#include "openMVG/cameras/cameras.hpp"
+#include "openMVG/cameras/Cameras_Common_command_line_helper.hpp"
+#include "openMVG/exif/exif_IO_EasyExif.hpp"
+#include "openMVG/exif/sensor_width_database/ParseDatabase.hpp"
+#include "openMVG/image/image_io.hpp"
+#include "openMVG/numeric/eigen_alias_definition.hpp"
+
+#include "openMVG/graph/graph.hpp"
+#include "openMVG/graph/graph_stats.hpp"
+#include "openMVG/features/descriptor.hpp"
+#include "openMVG/features/feature.hpp"
+
+#include "openMVG/matching_image_collection/Matcher_Regions.hpp"
+#include "openMVG/matching_image_collection/Cascade_Hashing_Matcher_Regions.hpp"
+#include "openMVG/matching_image_collection/GeometricFilter.hpp"
+
+#include "openMVG/sfm/pipelines/sfm_features_provider.hpp"
+#include "openMVG/sfm/pipelines/sfm_regions_provider.hpp"
+#include "openMVG/sfm/pipelines/sfm_regions_provider_cache.hpp"
+#include "openMVG/sfm/pipelines/sequential/sequential_SfM.hpp"
+#include "openMVG/sfm/pipelines/sfm_matches_provider.hpp"
+
+#include "openMVG/matching_image_collection/F_ACRobust.hpp"
+#include "openMVG/matching_image_collection/E_ACRobust.hpp"
+#include "openMVG/matching_image_collection/E_ACRobust_Angular.hpp"
+#include "openMVG/matching_image_collection/Eo_Robust.hpp"
+#include "openMVG/matching_image_collection/H_ACRobust.hpp"
+#include "openMVG/matching_image_collection/Pair_Builder.hpp"
+#include "openMVG/matching/pairwiseAdjacencyDisplay.hpp"
+
+#include "openMVG/sfm/sfm_data.hpp"
+#include "openMVG/sfm/sfm_data_io.hpp"
+#include "openMVG/sfm/sfm_data_utils.hpp"
+#include "openMVG/sfm/sfm_report.hpp"
+#include "openMVG/sfm/sfm_view.hpp"
+#include "openMVG/sfm/sfm_view_priors.hpp"
+#include "openMVG/types.hpp"
+#include "openMVG/jtcuda/cudaSift.h"
+#include "openMVG/jtcuda/cudaImage.h"
+#include "openMVG/stl/stl.hpp"
+#include <boost\timer.hpp>
+
+#include "third_party/progress/progress_display.hpp"
+#include "third_party/stlplus3/filesystemSimplified/file_system.hpp"
+#include "openMVG/matching/indMatch.hpp"
+#include "openMVG/matching/indMatch_utils.hpp"
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+
+#include <cstdlib>
+#include <fstream>
+#include <memory>
+#include <string>
+#include <utility>
+#include <omp.h>
+
+using namespace openMVG;
+using namespace openMVG::cameras;
+using namespace openMVG::features;
+using namespace openMVG::exif;
+using namespace openMVG::matching;
+using namespace openMVG::robust;
+using namespace openMVG::matching_image_collection;
+using namespace openMVG::image;
+using namespace openMVG::sfm;
+using namespace boost;
+using namespace std;
+using namespace cv;
+//******************************************************************************************************************
+//------------------------------------------ Definded Class
+//******************************************************************************************************************
+const double focal_pixels = 1000;
+double width = 648, height = 968;
+float initBlur = 2.0f;//jt 2.0 //the less ,the more points
+float thresh = 3.0f;//jt 3.0 //the less, the more points
+
+
+std::shared_ptr<SfM_Data>publicsfm_data;
+SiftData siftData;
+std::shared_ptr<vector<float>>myfeats[4];
+std::shared_ptr<vector<unsigned char>>mydescs[4];
+float* myfeats2[4];
+char* mydescs2[4];
+PairWiseMatches *Gmatches=new PairWiseMatches();
+
+
+int tmatches(std::string sOutputDir);
+bool transfor(SiftData& siftdata,std::vector<std::vector<float>>* myfeats, std::vector<std::vector<unsigned char>>*mydescs);
+bool SaveAll(SiftData& siftData, const std::string& FeatsFile, const std::string& DescsFlie);
+inline void siftDesc2UChar(float* descr, unsigned char* descrptor);
+int tlisting(std::string sImageDir, std::string& OutPath);
+std::shared_ptr<vector<float>> getfeatszone(SiftData& siftdata);
+std::shared_ptr<vector<unsigned char>> getdescszone(SiftData& siftdata);
+std::shared_ptr<vector<unsigned char>> desc2vector(std::string filename);
+char* getdescszone2(SiftData& siftdata);
+float* getfeatszone2(SiftData& siftdata);
+int tsfm(std::string sOutputDir);
+
+std::shared_ptr<vector<unsigned char>> desc2vector(std::string filename) {
+    std::ifstream file(filename.c_str(), std::ios::in | std::ios::binary);
+    std::shared_ptr<vector<unsigned char>>vec = std::make_shared<vector<unsigned char>>();
+    if (!file.is_open())
+        return vec;
+    std::size_t count = 0;
+    file.read(reinterpret_cast<char*>(&count), sizeof(std::size_t));
+    vec->resize(count*128);
+    std::cout << "desc2vector,count=" << count << std::endl;
+    std::vector<unsigned char>::iterator iter;
+    for (int i = 0; i < count; i++) {
+        file.read(reinterpret_cast<char*>(vec->data()+i),1);
+    }
+    const bool bOk = !file.bad();
+    file.close();
+    return vec;
+}
+
+inline void siftDesc2UChar(float* src, unsigned char* dest)
+{
+    const float sum = std::accumulate(src, src + 128, 0.0f);
+    for (int k = 0; k < 128; ++k)
+    {
+        dest[k] = static_cast<unsigned char>(512.f * sqrt(src[k] / sum));
+        //dest[k] = static_cast<unsigned char>(512.f * sqrt(dest[k]));
+    }
+}
+
+bool SaveAll(SiftData& siftData, const std::string& FeatsFile, const std::string& DescsFlie) {
+    const std::size_t  cardDesc = siftData.numPts;
+    SiftPoint* jt = siftData.h_data;
+    unsigned char Udata[128];
+
+    std::ofstream descsfile(DescsFlie.c_str(), std::ios::out | std::ios::binary);
+    std::ofstream featsfile(FeatsFile.c_str());
+    if (!descsfile.is_open() || !featsfile.is_open())
+        return false;
+    descsfile.write((const char*)&cardDesc, sizeof(std::size_t));
+    for (int i = 0; i < cardDesc; ++i)
+    {
+        featsfile << jt[i].xpos << ' ' << jt[i].ypos << ' ' << jt[i].scale << ' ' << (jt[i].orientation) * (float)0.0174533 << std::endl;
+        siftDesc2UChar(jt[i].data, Udata);
+        descsfile.write((char*)Udata, 128);
+    }
+    const bool bOk1 = descsfile.good();
+    const bool bOk2 = featsfile.good();
+    featsfile.close();
+    descsfile.close();
+    return bOk1 && bOk2;
+}
+bool SaveDescs(SiftData& siftData,const std::string& File) {
+    std::ofstream file(File.c_str());
+    if (!file.is_open()) {
+        return false;
+    }
+    SiftPoint* jt = siftData.h_data;
+    for (int i = 0; i < siftData.numPts; i++) {
+        const float sum = std::accumulate(jt[i].data,jt[i].data+128,0.0f);
+        for (int j = 0; j < 128; j++) {
+            file << static_cast < unsigned int>(512.f * sqrt(jt[i].data[j] / sum))<< ' ';
+            //file << jt[i].data[j]<<' ';
+        }
+        file << std::endl;
+    }
+    const bool ok = file.good();
+    return ok;
+}
+
+bool generatesfm(const std::string & sImageDir) {
+    if (!publicsfm_data) {
+        auto sfm_data = std::make_shared<SfM_Data>();
+        Views& views = sfm_data->views;
+        Intrinsics& intrinsics = sfm_data->intrinsics;
+        std::vector<std::string> vec_image = stlplus::folder_files(sImageDir);
+        std::sort(vec_image.begin(), vec_image.end());
+        double ppx, ppy;
+        for (std::vector<std::string>::const_iterator iter_image = vec_image.begin(); iter_image != vec_image.end(); ++iter_image) {
+            const std::string sImageFilename = stlplus::create_filespec(sImageDir, *iter_image);
+            ImageHeader imgHeader;
+            if (!openMVG::image::ReadImageHeader(sImageFilename.c_str(), &imgHeader))
+                continue;
+            width = imgHeader.width;
+            height = imgHeader.height;
+            ppx = width / 2.0, ppy = height / 2.0;
+            std::shared_ptr<IntrinsicBase> intrinsic = std::make_shared<Pinhole_Intrinsic_Radial_K3>(width, height, focal_pixels, ppx, ppy, 0.0, 0.0, 0.0);
+            {
+                View v(*iter_image, views.size(), views.size(), views.size(), width, height);
+                intrinsics[v.id_intrinsic] = intrinsic;
+                views[v.id_view] = std::make_shared<View>(v);
+            }
+        }
+        GroupSharedIntrinsics(*sfm_data);
+        std::cout << "publicsfm_data has been initialized!" << std::endl;
+        publicsfm_data = sfm_data;
+    }
+    return true;
+}
+
+bool transfor(SiftData& siftdata, std::vector<std::vector<float>>* myfeats, std::vector<std::vector<unsigned char>>*mydescs) {  
+    float k = 0.0174533;
+    std::vector<unsigned char> Udata;
+    Udata.reserve(128);
+    int totolcount = siftdata.numPts;
+    myfeats->reserve(totolcount);
+    mydescs->reserve(totolcount);
+    SiftPoint* jt = siftdata.h_data;
+
+    for (int i = 0; i < totolcount; i++) {
+        myfeats->push_back({ jt[i].xpos,jt[i].ypos,jt[i].scale,(float)(jt[i].orientation) * k });
+        float sum = std::accumulate(jt[i].data,jt[i].data+128,0.0f);
+        for (int j = 0; j++;j<128) {
+            Udata[j]= static_cast<unsigned char>(512.f * sqrt(jt[i].data[j]/sum));
+        }
+        mydescs->push_back(Udata);
+    }
+    std::cout << "myfeats[0]=" << (*myfeats)[0][0] <<std::endl;
+    return true;
+}
+std::shared_ptr<vector<float>> getfeatszone(SiftData& siftdata) {
+    float k = 0.0174533;
+    int count = siftdata.numPts;
+    std::cout << "特征子数量为" << count << std::endl;
+    auto feats = make_shared<vector<float>>();
+    feats->resize(count*4);
+    SiftPoint* jt = siftdata.h_data;
+    for (int i = 0; i < count; i++) {
+        feats->push_back(jt[i].xpos);
+        feats->push_back(jt[i].ypos);
+        feats->push_back(jt[i].scale);
+        feats->push_back(static_cast<float>(jt[i].orientation * k));
+    }
+    return feats;
+}
+
+float * getfeatszone2(SiftData& siftdata){
+    float k= 0.0174533;
+    SiftPoint* jt = siftdata.h_data;
+    int count = siftdata.numPts;
+    float * feats = new float[count*4+1];
+    *reinterpret_cast<int*>(feats) = count;
+    for (int i = 0; i < count; i++) {
+        *(feats + 4 * i + 1) = jt[i].xpos;
+        *(feats + 4 * i + 2) = jt[i].ypos;
+        *(feats + 4 * i + 3) = jt[i].scale;
+        *(feats + 4 * i + 4) = static_cast<float>(jt[i].orientation * k);
+    }
+    return feats;
+}
+
+std::shared_ptr<vector<unsigned char>> getdescszone(SiftData& siftdata) {
+    int count = siftdata.numPts;
+    auto descs = std::make_shared<vector<unsigned char>>();
+    descs->resize(count*128);
+    SiftPoint* jt = siftdata.h_data;
+    for (int i = 0; i < count; i++) {
+        float sum = std::accumulate(jt[i].data, jt[i].data + 128, 0.0f);
+        for (int j = 0; j < 128; j++) {
+            //descs->push_back(static_cast<unsigned char>(512.f * sqrt(jt[i].data[j])));
+            descs->push_back(static_cast<unsigned char>(512.f * sqrt(jt[i].data[j] / sum)));
+        }
+    }
+    std::cout <<"%%%%%%%%%%%%"<< *descs.get()->begin()<< std::endl;
+    return descs;
+}
+
+char* getdescszone2(SiftData& siftdata) {
+    int count = siftdata.numPts;
+    char* descs = new char[count*128+4];
+    for (int k = 0; k <4; k++)
+    {
+        descs[k] = ((count >> (8 * k)) & 0xff);
+    }
+    SiftPoint* jt = siftdata.h_data;
+    for (int i = 0; i < count; i++) {
+        int base = 128 * i;
+        float sum = std::accumulate(jt[i].data, jt[i].data + 128, 0.0f);
+        for (int j = 0; j < 128; j++) {
+            *(descs+4+base+j)=(static_cast<char>(512.f * sqrt(jt[i].data[j] / sum)));
+        }
+    }
+    return descs;
+}
+
+class bufferA {
+public:
+    bool setFeatszone(SiftData& siftdata);
+    bool setDescszone(SiftData& siftdata);
+    cv::Mat* getMat(int index);
+    bool setMat(void*);
+    float** getFeatszone();
+    char** getDescszone();
+    bufferA* next;
+
+private:
+    cv::Mat mat[4];
+    float* featszone[4];
+    char* descszone[4];
+};
+//类的指针是否能够循环。
+class bufferB {
+public:
+    bool setFeatszone(bufferA & buffer);
+    bool setDescszone(bufferA& buffer);
+    bool setGmatches(PairWiseMatches& Gmatches);
+private:
+    PairWiseMatches* Gmatches;
+    float** feats[4];
+    char** descs[4];
+};
+
+ cv::Mat* bufferA::getMat(int index) {
+    return &mat[index] ;
+}
+ bool bufferA::setMat(void*) {
+     return true;
+ }
+
+int tlisting(std::string sImageDir, std::string& OutPath) {
+    cv::Mat mat;
+    CudaImage cudaImg;
+    InitSiftData(siftData, 30000, true, true);
+    float* memoryTmp = AllocSiftTempMemory(width, height, 5, false);
+    if (!generatesfm(sImageDir)) {return 0;}
+    int i = 0;
+    while (true) {
+        for (Views::const_iterator iter_image = publicsfm_data->GetViews().begin(); iter_image != publicsfm_data->GetViews().end(); ++iter_image) {
+            const std::string sImageName = stlplus::create_filespec(sImageDir, iter_image->second->s_Img_path);
+            const std::string basename = stlplus::basename_part(sImageName);
+            const std::string sFeat = stlplus::create_filespec(OutPath, basename, ".feat");
+            const std::string sDesc = stlplus::create_filespec(OutPath, basename, ".desc");
+            cv::imread(sImageName, 0).convertTo(mat, CV_32FC1);
+            cudaImg.Allocate(width, height, iAlignUp(width, 128), false, NULL, (float*)mat.data);
+            cudaImg.Download();
+            ExtractSift(siftData, cudaImg, 5, initBlur, thresh, 0.0f, false, memoryTmp);
+            myfeats2[i] = getfeatszone2(siftData);
+            mydescs2[i] = getdescszone2(siftData);
+            i++;
+        }
+        break;
+    }
+    return 0;
+}
+
+
+
+int tmatches(std::string OutPath) {
+    std::unique_ptr<Regions> regions_type(new features::SIFT_Regions);
+    std::shared_ptr<Regions_Provider> regions_provider=std::make_shared<Regions_Provider>();
+    if (!regions_provider->load(*publicsfm_data, OutPath, regions_type, myfeats2, mydescs2)) {
+        std::cerr << std::endl << "Invalid regions." << std::endl;
+        return EXIT_FAILURE;
+    }
+    PairWiseMatches map_PutativesMatches;
+    std::unique_ptr<Matcher> collectionMatcher(new Cascade_Hashing_Matcher_Regions(0.8));//0.8 jt_infor : the higher, the more points
+    if (!collectionMatcher) {std::cerr << "Invalid Nearest Neighbor method" << std::endl; return EXIT_FAILURE;}
+    Pair_Set pairs= exhaustivePairs(publicsfm_data->GetViews().size());
+    collectionMatcher->Match(regions_provider, pairs, map_PutativesMatches, nullptr);
+
+    std::unique_ptr<ImageCollectionGeometricFilter> filter_ptr(new ImageCollectionGeometricFilter(publicsfm_data.get(), regions_provider));
+    if (filter_ptr)
+    {
+        const double d_distance_ratio = 0.6;//0.6 jt_info the higher, the more points. lower the ratio, means a more stable match.
+        filter_ptr->Robust_model_estimation(GeometricFilter_FMatrix_AC(4.0, 2048), map_PutativesMatches, false, d_distance_ratio, nullptr);
+        *Gmatches = filter_ptr->Get_geometric_matches();
+    }
+    return 0;
+}
+
+int tsfm(std::string sOutputDir) {
+        const cameras::Intrinsic_Parameter_Type intrinsic_refinement_options = cameras::StringTo_Intrinsic_Parameter_Type("ADJUST_ALL");//ADJUST_ALL jt_infor: the less, the quicker.maybe this value should be checked.
+        SfM_Data* sfm_data = publicsfm_data.get();
+        int triangulation_method =  static_cast<int>(ETriangulationMethod::DEFAULT);//DIRECT_LINEAR_TRANSFORM,L1_ANGULAR,LINFINITY_ANGULAR, INVERSE_DEPTH_WEIGHTED_MIDPOINT(defualt)
+        int resection_method = static_cast<int>(resection::SolverType::DEFAULT);// DLT_6POINTS = 0,P3P_KE_CVPR17 = 1,P3P_KNEIP_CVPR11 = 2, P3P_NORDBERG_ECCV18 = 3(default),UP2P_KUKELOVA_ACCV10 = 4,
+        // Features reading
+        std::shared_ptr<Features_Provider> feats_provider = std::make_shared<Features_Provider>();
+        if(!feats_provider->myload(myfeats2))
+        {
+            std::cerr << std::endl<< "Invalid features." << std::endl;
+            return EXIT_FAILURE;
+        }
+        // Matches reading
+        std::shared_ptr<Matches_Provider> matches_provider = std::make_shared<Matches_Provider>();
+        matches_provider->pairWise_matches_= *Gmatches;
+        SequentialSfMReconstructionEngine sfmEngine(*sfm_data, sOutputDir, "");
+        sfmEngine.SetFeaturesProvider(feats_provider.get());
+        sfmEngine.SetMatchesProvider(matches_provider.get());
+        // Configure reconstruction parameters
+        sfmEngine.Set_Intrinsics_Refinement_Type(intrinsic_refinement_options);
+        sfmEngine.SetUnknownCameraType(EINTRINSIC(PINHOLE_CAMERA_RADIAL3));
+        sfmEngine.Set_Use_Motion_Prior(false);
+        sfmEngine.SetTriangulationMethod(static_cast<ETriangulationMethod>(triangulation_method));
+        sfmEngine.SetResectionMethod(static_cast<resection::SolverType>(resection_method));
+        std::cout << "Ready to process..." << std::endl;
+        if (sfmEngine.Process())
+        {
+            Save(sfmEngine.Get_SfM_Data(), stlplus::create_filespec(sOutputDir, "clouds", ".ply"), ESfM_Data(ALL));
+            return EXIT_SUCCESS;
+        }
+        return EXIT_FAILURE;
+}
+
+int main(int argc, char** argv) {
+    std::string sImageDir = "C:\\Users\\MVP\\Desktop\\localwork\\images\\";
+    std::string sOutputDir = "C:\\Users\\MVP\\Desktop\\localwork\\results\\";
+    InitCuda(0);
+    timer t;
+    tlisting(sImageDir, sOutputDir);
+    double t1 = t.elapsed();
+    std::cout << "[1]time of Sift：" << t1 << "(s)" << std::endl;
+    tmatches(sOutputDir);
+    double t2 = t.elapsed();
+    std::cout << "[2]time of Match：" << t2 - t1 << "(s)" << std::endl;
+    tsfm(sOutputDir);
+    std::cout << "[3]time of SfM:：" << t.elapsed() - t2 << "(s)" << std::endl;
+    return 0;
+}
+
+
+
